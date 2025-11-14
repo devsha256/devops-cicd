@@ -1,201 +1,201 @@
-  # Apply Ingress Rules using Anypoint CLI
-  - stage: ApplyIngressRules
-    displayName: 'Apply Ingress Rules'
-    dependsOn: Deploy
-    condition: succeeded('Deploy')
-    jobs:
-      - job: IngressJob
-        displayName: 'Configure Ingress Rules Job'
-        steps:
-          # Install Node.js (required for Anypoint CLI v4)
-          - task: NodeTool@0
-            displayName: 'Install Node.js'
-            inputs:
-              versionSpec: '18.x'
+# Apply Ingress Rules using Anypoint CLI
+- stage: ApplyIngressRules
+  displayName: 'Apply Ingress Rules'
+  dependsOn: Deploy
+  condition: succeeded('Deploy')
+  jobs:
+    - job: IngressJob
+      displayName: 'Configure Ingress Rules Job'
+      steps:
+        # Install Node.js (required for Anypoint CLI v4)
+        - task: NodeTool@0
+          displayName: 'Install Node.js'
+          inputs:
+            versionSpec: '18.x'
 
-          # Install Anypoint CLI v4
-          - script: |
-              npm install -g @mulesoft/anypoint-cli-v4
-              anypoint-cli-v4 --version
-            displayName: 'Install Anypoint CLI v4'
+        # Install Anypoint CLI v4
+        - script: |
+            npm install -g @mulesoft/anypoint-cli-v4
+            anypoint-cli-v4 --version
+          displayName: 'Install Anypoint CLI v4'
 
-          # Download settings.xml to extract credentials
-          - task: DownloadSecureFile@1
-            displayName: 'Download settings.xml'
-            inputs:
-              secureFile: 'settings.xml'
+        # Download settings.xml to extract credentials
+        - task: DownloadSecureFile@1
+          displayName: 'Download settings.xml'
+          inputs:
+            secureFile: 'settings.xml'
 
-          # Download ingress configuration JSON
-          - task: DownloadSecureFile@1
-            displayName: 'Download ingress-config.json'
-            inputs:
-              secureFile: 'ingress-config.json'
-            name: ingressConfig
+        # Download ingress configuration JSON
+        - task: DownloadSecureFile@1
+          displayName: 'Download ingress-config.json'
+          inputs:
+            secureFile: 'ingress-config.json'
+          name: ingressConfig
 
-          # Authenticate Anypoint CLI
-          - script: |
-              #!/bin/bash
-              set -e
+        # Authenticate Anypoint CLI
+        - script: |
+            #!/bin/bash
+            set -e
+            
+            echo "========================================="
+            echo "Authenticating with Anypoint Platform"
+            echo "========================================="
+            
+            # Install xmllint if not available
+            if ! command -v xmllint &> /dev/null; then
+              sudo apt-get update && sudo apt-get install -y libxml2-utils
+            fi
+            
+            # Parse credentials from settings.xml
+            ANYPOINT_USERNAME=$(xmllint --xpath 'string(//server[id="anypoint-exchange-v3"]/username)' $(Agent.TempDirectory)/settings.xml)
+            ANYPOINT_PASSWORD=$(xmllint --xpath 'string(//server[id="anypoint-exchange-v3"]/password)' $(Agent.TempDirectory)/settings.xml)
+            
+            echo "Username: $ANYPOINT_USERNAME"
+            echo "Configuring Anypoint CLI..."
+            
+            # Configure Anypoint CLI with credentials
+            anypoint-cli-v4 conf username "$ANYPOINT_USERNAME"
+            anypoint-cli-v4 conf password "$ANYPOINT_PASSWORD"
+            anypoint-cli-v4 conf organization "$(businessGroupId)"
+            anypoint-cli-v4 conf environment "$(environment)"
+            
+            echo "✅ Authentication successful"
+            
+          displayName: 'Authenticate Anypoint CLI'
+
+        # Get Application ID
+        - script: |
+            #!/bin/bash
+            set -e
+            
+            echo "========================================="
+            echo "Retrieving Application ID"
+            echo "========================================="
+            
+            APP_NAME="$(app.name)"
+            
+            echo "Application Name: $APP_NAME"
+            
+            # Get application ID using Anypoint CLI
+            APP_LIST=$(anypoint-cli-v4 runtime-mgr:application:list --output json)
+            APP_ID=$(echo "$APP_LIST" | jq -r --arg appName "$APP_NAME" '.[] | select(.name == $appName) | .id')
+            
+            if [ -z "$APP_ID" ] || [ "$APP_ID" == "null" ]; then
+              echo "❌ Application not found: $APP_NAME"
+              exit 1
+            fi
+            
+            echo "✅ Found Application ID: $APP_ID"
+            
+            # Export application ID for next step
+            echo "##vso[task.setvariable variable=APP_ID]$APP_ID"
+            
+          displayName: 'Get Application ID'
+
+        # Apply ingress rules using jq loop and Anypoint CLI
+        - script: |
+            #!/bin/bash
+            set -e
+            
+            echo "========================================="
+            echo "Applying Ingress Rules"
+            echo "========================================="
+            
+            INGRESS_CONFIG_FILE="$(ingressConfig.secureFilePath)"
+            APP_ID="$(APP_ID)"
+            
+            # Verify config file exists
+            if [ ! -f "$INGRESS_CONFIG_FILE" ]; then
+              echo "❌ Ingress configuration file not found: $INGRESS_CONFIG_FILE"
+              exit 1
+            fi
+            
+            echo "Reading ingress configuration from: $INGRESS_CONFIG_FILE"
+            echo ""
+            
+            # Build arrays for public endpoints and path rewrites
+            PUBLIC_ENDPOINTS=()
+            PATH_REWRITES=()
+            
+            # Apply ingress configuration from file using jq loop
+            jq -c '.endpoints[]' "$INGRESS_CONFIG_FILE" | while read endpoint; do
               
-              echo "========================================="
-              echo "Authenticating with Anypoint Platform"
-              echo "========================================="
+              # Extract endpoint properties
+              URL=$(echo "$endpoint" | jq -r '.url')
+              PATH=$(echo "$endpoint" | jq -r '.path')
+              PATH_REWRITE=$(echo "$endpoint" | jq -r '.pathRewrite')
+              ACCESS=$(echo "$endpoint" | jq -r '.access')
+              HOST=$(echo "$endpoint" | jq -r '.host')
+              SUBDOMAIN=$(echo "$endpoint" | jq -r '.subdomain // empty')
               
-              # Install xmllint if not available
-              if ! command -v xmllint &> /dev/null; then
-                sudo apt-get update && sudo apt-get install -y libxml2-utils
+              # Substitute pipeline variables
+              URL="${URL//\$\{host\}/$(host)}"
+              URL="${URL//\$\{app.name\}/$(app.name)}"
+              URL="${URL//\$\{pipelineEnv\}/$(pipelineEnv)}"
+              
+              HOST="${HOST//\$\{host\}/$(host)}"
+              HOST="${HOST//\$\{app.name\}/$(app.name)}"
+              HOST="${HOST//\$\{pipelineEnv\}/$(pipelineEnv)}"
+              
+              # Construct full endpoint URL
+              if [ -n "$SUBDOMAIN" ]; then
+                FULL_ENDPOINT="${HOST}/${SUBDOMAIN}${PATH}"
+              else
+                FULL_ENDPOINT="${HOST}${PATH}"
               fi
               
-              # Parse credentials from settings.xml
-              ANYPOINT_USERNAME=$(xmllint --xpath 'string(//server[id="anypoint-exchange-v3"]/username)' $(Agent.TempDirectory)/settings.xml)
-              ANYPOINT_PASSWORD=$(xmllint --xpath 'string(//server[id="anypoint-exchange-v3"]/password)' $(Agent.TempDirectory)/settings.xml)
+              echo "------------------------------------"
+              echo "Configuring endpoint: $PATH"
+              echo "  URL: $URL"
+              echo "  Full Endpoint: $FULL_ENDPOINT"
+              echo "  Path: $PATH"
+              echo "  Path Rewrite: $PATH_REWRITE"
+              echo "  Access: $ACCESS"
+              echo "------------------------------------"
               
-              echo "Username: $ANYPOINT_USERNAME"
-              echo "Configuring Anypoint CLI..."
-              
-              # Configure Anypoint CLI with credentials
-              anypoint-cli-v4 conf username "$ANYPOINT_USERNAME"
-              anypoint-cli-v4 conf password "$ANYPOINT_PASSWORD"
-              anypoint-cli-v4 conf organization "$(businessGroupId)"
-              anypoint-cli-v4 conf environment "$(environment)"
-              
-              echo "✅ Authentication successful"
-              
-            displayName: 'Authenticate Anypoint CLI'
-
-          # Get Application ID
-          - script: |
-              #!/bin/bash
-              set -e
-              
-              echo "========================================="
-              echo "Retrieving Application ID"
-              echo "========================================="
-              
-              APP_NAME="$(app.name)"
-              
-              echo "Application Name: $APP_NAME"
-              
-              # Get application ID using Anypoint CLI
-              APP_LIST=$(anypoint-cli-v4 runtime-mgr:application:list --output json)
-              APP_ID=$(echo "$APP_LIST" | jq -r --arg appName "$APP_NAME" '.[] | select(.name == $appName) | .id')
-              
-              if [ -z "$APP_ID" ] || [ "$APP_ID" == "null" ]; then
-                echo "❌ Application not found: $APP_NAME"
-                exit 1
+              # Build the modify command with ingress settings
+              if [ "$ACCESS" == "external" ]; then
+                ENDPOINT_FLAG="--publicEndpoints"
+              else
+                ENDPOINT_FLAG="--internalEndpoints"
               fi
               
-              echo "✅ Found Application ID: $APP_ID"
+              # Execute Anypoint CLI to modify application with ingress endpoint
+              echo "Executing: anypoint-cli-v4 runtime-mgr:application:modify $APP_ID $ENDPOINT_FLAG \"$FULL_ENDPOINT\" --pathRewrite \"$PATH_REWRITE\""
               
-              # Export application ID for next step
-              echo "##vso[task.setvariable variable=APP_ID]$APP_ID"
+              anypoint-cli-v4 runtime-mgr:application:modify "$APP_ID" \
+                $ENDPOINT_FLAG "$FULL_ENDPOINT" \
+                --pathRewrite "$PATH_REWRITE" \
+                --output json
               
-            displayName: 'Get Application ID'
-
-          # Apply ingress rules using jq loop and Anypoint CLI
-          - script: |
-              #!/bin/bash
-              set -e
-              
-              echo "========================================="
-              echo "Applying Ingress Rules"
-              echo "========================================="
-              
-              INGRESS_CONFIG_FILE="$(ingressConfig.secureFilePath)"
-              APP_ID="$(APP_ID)"
-              
-              # Verify config file exists
-              if [ ! -f "$INGRESS_CONFIG_FILE" ]; then
-                echo "❌ Ingress configuration file not found: $INGRESS_CONFIG_FILE"
-                exit 1
-              fi
-              
-              echo "Reading ingress configuration from: $INGRESS_CONFIG_FILE"
+              echo "✅ Endpoint applied successfully"
               echo ""
               
-              # Build arrays for public endpoints and path rewrites
-              PUBLIC_ENDPOINTS=()
-              PATH_REWRITES=()
-              
-              # Apply ingress configuration from file using jq loop
-              jq -c '.endpoints[]' "$INGRESS_CONFIG_FILE" | while read endpoint; do
-                
-                # Extract endpoint properties
-                URL=$(echo "$endpoint" | jq -r '.url')
-                PATH=$(echo "$endpoint" | jq -r '.path')
-                PATH_REWRITE=$(echo "$endpoint" | jq -r '.pathRewrite')
-                ACCESS=$(echo "$endpoint" | jq -r '.access')
-                HOST=$(echo "$endpoint" | jq -r '.host')
-                SUBDOMAIN=$(echo "$endpoint" | jq -r '.subdomain // empty')
-                
-                # Substitute pipeline variables
-                URL="${URL//\$\{host\}/$(host)}"
-                URL="${URL//\$\{app.name\}/$(app.name)}"
-                URL="${URL//\$\{pipelineEnv\}/$(pipelineEnv)}"
-                
-                HOST="${HOST//\$\{host\}/$(host)}"
-                HOST="${HOST//\$\{app.name\}/$(app.name)}"
-                HOST="${HOST//\$\{pipelineEnv\}/$(pipelineEnv)}"
-                
-                # Construct full endpoint URL
-                if [ -n "$SUBDOMAIN" ]; then
-                  FULL_ENDPOINT="${HOST}/${SUBDOMAIN}${PATH}"
-                else
-                  FULL_ENDPOINT="${HOST}${PATH}"
-                fi
-                
-                echo "------------------------------------"
-                echo "Configuring endpoint: $PATH"
-                echo "  URL: $URL"
-                echo "  Full Endpoint: $FULL_ENDPOINT"
-                echo "  Path: $PATH"
-                echo "  Path Rewrite: $PATH_REWRITE"
-                echo "  Access: $ACCESS"
-                echo "------------------------------------"
-                
-                # Build the modify command with ingress settings
-                if [ "$ACCESS" == "external" ]; then
-                  ENDPOINT_FLAG="--publicEndpoints"
-                else
-                  ENDPOINT_FLAG="--internalEndpoints"
-                fi
-                
-                # Execute Anypoint CLI to modify application with ingress endpoint
-                echo "Executing: anypoint-cli-v4 runtime-mgr:application:modify $APP_ID $ENDPOINT_FLAG \"$FULL_ENDPOINT\" --pathRewrite \"$PATH_REWRITE\""
-                
-                anypoint-cli-v4 runtime-mgr:application:modify "$APP_ID" \
-                  $ENDPOINT_FLAG "$FULL_ENDPOINT" \
-                  --pathRewrite "$PATH_REWRITE" \
-                  --output json
-                
-                echo "✅ Endpoint applied successfully"
-                echo ""
-                
-              done
-              
-              echo "======================================"
-              echo "✅ All ingress rules applied successfully"
-              
-            displayName: 'Apply Ingress Rules with Anypoint CLI'
+            done
+            
+            echo "======================================"
+            echo "✅ All ingress rules applied successfully"
+            
+          displayName: 'Apply Ingress Rules with Anypoint CLI'
 
-          # Verify ingress configuration
-          - script: |
-              #!/bin/bash
-              set -e
-              
-              echo "========================================="
-              echo "Verifying Ingress Configuration"
-              echo "========================================="
-              
-              APP_ID="$(APP_ID)"
-              
-              # Get application details to verify ingress
-              APP_DETAILS=$(anypoint-cli-v4 runtime-mgr:application:describe "$APP_ID" --output json)
-              
-              echo "Current Application Endpoints:"
-              echo "$APP_DETAILS" | jq '.target.deploymentSettings.http.inbound // "No ingress configuration found"'
-              
-              echo "✅ Verification complete"
-              
-            displayName: 'Verify Ingress Configuration'
-            condition: succeededOrFailed()
+        # Verify ingress configuration
+        - script: |
+            #!/bin/bash
+            set -e
+            
+            echo "========================================="
+            echo "Verifying Ingress Configuration"
+            echo "========================================="
+            
+            APP_ID="$(APP_ID)"
+            
+            # Get application details to verify ingress
+            APP_DETAILS=$(anypoint-cli-v4 runtime-mgr:application:describe "$APP_ID" --output json)
+            
+            echo "Current Application Endpoints:"
+            echo "$APP_DETAILS" | jq '.target.deploymentSettings.http.inbound // "No ingress configuration found"'
+            
+            echo "✅ Verification complete"
+            
+          displayName: 'Verify Ingress Configuration'
+          condition: succeededOrFailed()
