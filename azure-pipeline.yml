@@ -1,0 +1,173 @@
+# 1  Trigger on Branch Push
+trigger:
+  batch: true
+  branches:
+    include:
+      - prod
+      - dev
+      - pre-prod
+      - qa
+
+# 11 Trigger on Branch Pull
+pr:
+  branches:
+    include:
+      - prod
+      - dev
+      - pre-prod
+      - qa
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  - name: MAVEN_CACHE_FOLDER
+    value: $(pipeline.workspace)/.m2/repository
+  - name: MAVEN_OPTS
+    value: -Dmaven.repo.local=$(MAVEN_CACHE_FOLDER)
+
+# 29  Define variable group based on branch
+- ${{ if eq(variables['Build.SourceBranchName'], 'dev') }}:
+    - group: Mulesoft-Retail-CXT-Dev-Variables
+- ${{ if eq(variables['Build.SourceBranchName'], 'pre-prod') }}:
+    - group: Mulesoft-Retail-CXT-Preprod-Variables
+- ${{ if eq(variables['Build.SourceBranchName'], 'qa') }}:
+    - group: Mulesoft-Retail-CXT-QA-Variables
+- ${{ if eq(variables['Build.SourceBranchName'], 'prod') }}:
+    - group: Mulesoft-Retail-CXT-Prod-Variables
+
+# 40  Build Stage
+stages:
+  - stage: Build
+    displayName: "Build Stage"
+    jobs:
+      - job: BuildJob
+        displayName: "Maven Build Job"
+        steps:
+          - script: |
+              echo "Validating branch promotion..."
+              echo "Build Reason: $(Build_Reason)"
+
+              TARGET_BRANCH="$(System.PullRequest.TargetBranch)"
+              SOURCE_BRANCH="$(System.PullRequest.SourceBranch)"
+
+              # Normalize refs/heads/
+              if [[ "$SOURCE_BRANCH" == refs/heads/* ]]; then
+                SOURCE_BRANCH="${SOURCE_BRANCH#refs/heads/}"
+              fi
+
+              if [[ "$TARGET_BRANCH" == refs/heads/* ]]; then
+                TARGET_BRANCH="${TARGET_BRANCH#refs/heads/}"
+              fi
+
+              echo "Source branch: $SOURCE_BRANCH"
+              echo "target branch: $TARGET_BRANCH"
+
+              if [[ "$TARGET_BRANCH" == 'dev' && "$SOURCE_BRANCH" != 'staging' ]]; then
+                echo "❌ Dev can only be promoted from staging"
+                exit 1
+              fi
+
+              if [[ "$TARGET_BRANCH" == 'qa' && !( "$SOURCE_BRANCH" == 'dev' || "$SOURCE_BRANCH" == 'pre-prod' ) ]]; then
+                echo "❌ QA can only be promoted from dev or pre-prod"
+                exit 1
+              fi
+
+              if [[ "$TARGET_BRANCH" == 'pre-prod' && !( "$SOURCE_BRANCH" == 'dev' || "$SOURCE_BRANCH" == 'qa' ) ]]; then
+                echo "❌ Pre-Prod can only be promoted from dev or qa"
+                exit 1
+              fi
+
+              if [[ "$TARGET_BRANCH" == 'prod' && !( "$SOURCE_BRANCH" == 'qa' || "$SOURCE_BRANCH" == 'pre-prod' ) ]]; then
+                echo "❌ Prod can only be promoted from QA or Pre-Prod"
+                exit 1
+              fi
+
+              echo "✅ Promotion validated."
+            displayName: "# Enforce Branch Promotion Order"
+            condition: eq(variables['Build_Reason'], 'PullRequest')
+
+          - task: DownloadSecureFile@1
+            displayName: 'Download settings.xml'
+            condition: eq(variables['Build_Reason'], 'PullRequest')
+            inputs:
+              secureFile: 'settings.xml'
+          - task: Cache@2
+            displayName: Cache Maven local repo
+            condition: ne(variables['Build_Reason'], 'PullRequest')
+            inputs:
+              key: maven | $(Agent.OS) | **/pom.xml
+              restoreKeys:
+                - maven | $(Agent.OS)
+                - maven
+              path: $(MAVEN_CACHE_FOLDER)
+          - script: mvn install -B -e -s $(Agent.TempDirectory)/settings.xml -DskipTests=true
+            displayName: 'Maven Install'
+            condition: ne(variables['Build_Reason'], 'PullRequest')
+          - script: |
+              echo "Generating effective POM..."
+              mvn help:effective-pom -Doutput=effective-pom.xml
+              cat effective-pom.xml
+            displayName: 'Generate and View Effective POM'
+            condition: eq(variables['Build_Reason'], 'PullRequest')
+
+  # 125 Publish to Exchange (only for dev)
+  - stage: Publish
+    displayName: "Publish to Exchange"
+    dependsOn: Build
+    condition: and(succeeded(), eq(variables['Build.SourceBranchName'], 'dev'))
+    jobs:
+      - job: PublishJob
+        displayName: "Publish Job"
+        steps:
+          - task: DownloadSecureFile@1
+            displayName: 'Download settings.xml'
+            inputs:
+              secureFile: 'settings.xml'
+          - task: Maven@4
+            displayName: 'Publish Artifact to Exchange'
+            inputs:
+              mavenPomFile: 'pom.xml'
+              mavenOptions: '-B -e -s $(Agent.TempDirectory)/settings.xml $(MAVEN_OPTS)'
+              publishJUnitResults: false
+              testResultsFiles: '**/TEST-*.xml'
+              javaHomeOption: 'JDKVersion'
+              jdkVersionOption: 1.8
+              jdkArchitectureOption: x64
+              goals: 'deploy:deploy-file'
+              options: '-DskipTests -DtargetName=$(targetName) -Denv=$(environment) -DbusinessGroupId=$(businessGroupID) -DpipelineEnv=$(pipelineEnv) -Dhost=$(host) -DsecurityKey=$(securityKey)'
+
+  # 154 Deploy to Cloudhub 2.0
+  - stage: Deploy
+    displayName: "Deploy to Cloudhub 2.0"
+    dependsOn: Build
+    condition: | 
+      and(
+        or(
+          eq(variables['Build.SourceBranchName'], 'dev'),
+          eq(variables['Build.SourceBranchName'], 'pre-prod'),
+          eq(variables['Build.SourceBranchName'], 'qa'),
+          eq(variables['Build.SourceBranchName'], 'prod')
+        ),
+        succeeded('Publish')
+      )
+    jobs:
+      - job: DeployJob
+        displayName: "Deploy Job"
+        steps:
+          - task: DownloadSecureFile@1
+            displayName: 'Download settings.xml'
+            inputs:
+              secureFile: 'settings.xml'
+          - task: Maven@4
+            displayName: 'Deploy to Cloudhub 2.0'
+            inputs:
+              mavenPomFile: 'pom.xml'
+              mavenOptions: '-B -e -s $(Agent.TempDirectory)/settings.xml $(MAVEN_OPTS)'
+              publishJUnitResults: false
+              testResultsFiles: '**/TEST-*.xml'
+              javaHomeOption: 'JDKVersion'
+              jdkVersionOption: 1.8
+              jdkArchitectureOption: x64
+              goals: 'deploy'
+              options: '-DskipTests -DtargetName=$(targetName) -Denv=$(environment) -DbusinessGroupId=$(businessGroupID) -DpipelineEnv=$(pipelineEnv) -Dhost=$(host) -DsecurityKey=$(securityKey)'
