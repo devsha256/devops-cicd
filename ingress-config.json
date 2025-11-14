@@ -1,0 +1,28 @@
+{
+  "endpoints": [
+    {
+      "url": "${host}-${app.name}-${pipelineEnv}",
+      "pathRewrite": "/",
+      "access": "external",
+      "host": "https://api-dev.tech.net",
+      "subdomain": "",
+      "path": "/vc-cxt-amb-eapi-dev"
+    },
+    {
+      "url": "${host}/ws/rest/AMB",
+      "pathRewrite": "/ws/rest/AMB",
+      "access": "external",
+      "host": "https://api-dev.tech.net",
+      "subdomain": "",
+      "path": "/ws/rest/AMB"
+    },
+    {
+      "url": "${host}/ws/rest/Customer",
+      "pathRewrite": "/ws/rest/Customer",
+      "access": "external",
+      "host": "https://api-dev.tech.net",
+      "subdomain": "",
+      "path": "/ws/rest/Customer"
+    }
+  ]
+}
